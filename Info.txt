@@ -8,7 +8,7 @@ Para descargar de GitHub los cambios anteriores (si los hizo el otro compañero)
 Para subir nuevos cambios:
 - Si se crea un nuevo archivo:
 1) git add doc.txt
-2) git commit -a -m "Comentarios" (Hacerlo de golpe todo)
+2) git commit -a -m "Comentarios" (Actualizar archivos existentes)
 
 2) git commit -m "Comentarios"
 3) git push
