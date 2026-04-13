@@ -1,1 +1,14 @@
-Esto es una prueba
+Para hacer commits y trabajar en grupo:
+
+IMPORTANTE: cd /d/LabProyecto/LPIT Poner ruta donde esta la carpeta
+
+Para descargar de GitHub los cambios anteriores (si los hizo el otro compañero)
+1) git pull 
+
+Para subir nuevos cambios:
+- Si se crea un nuevo archivo:
+1) git add doc.txt
+2) git commit -a -m "Comentarios" (Hacerlo de golpe todo)
+
+2) git commit -m "Comentarios"
+3) git push
