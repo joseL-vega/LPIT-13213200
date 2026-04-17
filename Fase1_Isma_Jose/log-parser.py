@@ -8,71 +8,103 @@ from datetime import datetime
 
 # --- CONFIGURACIÓN Y BÚFER GLOBAL ---
 archivo_log = "cu-lan-ho.log"
-archivo_parquet = "data.parquet" # Nombre del archivo de salida 
+archivo_parquet = "data.parquet"
 historico_grafica = [] 
-datos_totales_sesion = [] # Para el guardado persistente en Parquet
+datos_totales_sesion = []
 lock = threading.Lock()
 
-# --- MOTOR DE LECTURA (HILO SECUNDARIO) ---
+# --- FASE 2: LA AGENDA DE USUARIOS ---
+# Diccionario para guardar: { 1: {'plmn': '21405', 'pci': '802', 'rnti': '0x4602'} }
+info_usuarios = {} 
+
+# --- MOTOR DE LECTURA (HILO SECUNDARIO) --- PUNTO 1
 def motor_lectura():
-    global historico_grafica, datos_totales_sesion
+    global historico_grafica, datos_totales_sesion, info_usuarios
     
-    proximo_guardado_parquet = time.time() + 30 # Cronómetro para el punto 6
+    inicio_segundo = None
+    proximo_guardado_parquet = None
+    datos_segundo_actual = []
     
     with open(archivo_log, 'r') as archivo:
-        datos_segundo_actual = []
-        inicio_segundo = time.time()
-        
         while True:
             linea = archivo.readline()
             if not linea:
                 time.sleep(0.01)
                 continue
             
-            # Punto 2: Filtrado SDAP [cite: 2306]
+            try:
+                tiempo_actual_log = datetime.fromisoformat(linea.split()[0])
+            except (ValueError, IndexError):
+                continue
+
+            if inicio_segundo is None:
+                inicio_segundo = tiempo_actual_log
+                proximo_guardado_parquet = tiempo_actual_log.timestamp() + 30
+            
+            # ------------------------------------------------------------
+            # FASE 2: CAZADOR DE IDENTIDADES (Enriquecimiento)
+            # Buscamos la línea de creación del UE para nutrir la agenda
+            if "Created new CU-CP UE" in linea:
+                match_info = re.search(r"ue=(\d+).*?plmn=(\d+).*?pci=(\d+).*?rnti=(\w+)", linea)
+                if match_info:
+                    ue_id = int(match_info.group(1))
+                    # Guardamos los datos en la agenda
+                    info_usuarios[ue_id] = {
+                        "plmn": match_info.group(2),
+                        "pci": match_info.group(3),
+                        "rnti": match_info.group(4)
+                    }
+            # ------------------------------------------------------------
+
+            # FASE 1: FILTRADO SDAP (Descarga de datos) PUNTO 2
             if "SDAP" in linea and "TX PDU" in linea:
-                match = re.search(r"ue=(\d+).*pdu_len=(\d+)", linea)
-                if match:
-                    datos_segundo_actual.append({"ue": match.group(1), "bytes": int(match.group(2))})
+                match_datos = re.search(r"ue=(\d+).*pdu_len=(\d+)", linea)
+                if match_datos:
+                    datos_segundo_actual.append({"ue": int(match_datos.group(1)), "bytes": int(match_datos.group(2))})
             
-            ahora = time.time()
-            
-            # Punto 4: Agregación cada 1 segundo [cite: 2308]
-            if ahora - inicio_segundo >= 1.0:
+            # FASE 1: AGREGACIÓN CADA 1 SEGUNDO PUNTO 4
+            if (tiempo_actual_log - inicio_segundo).total_seconds() >= 1.0:
                 if datos_segundo_actual:
                     df = pl.DataFrame(datos_segundo_actual)
                     resumen = df.group_by("ue").agg(pl.col("bytes").sum().alias("consumo"))
                     
                     with lock:
-                        timestamp = datetime.now()
                         for fila in resumen.to_dicts():
+                            ue_id = fila['ue']
+                            
+                            # --- FASE 2: EL CHIVATO (Consultamos la agenda) ---
+                            # Si el usuario está en la agenda, cogemos sus datos. Si no, ponemos "Desconocido"
+                            info = info_usuarios.get(ue_id, {"plmn": "?", "pci": "?", "rnti": "?"})
+                            
+                            # Creamos una etiqueta enriquecida súper pro para la gráfica
+                            etiqueta_pro = f"UE {ue_id} [PLMN:{info['plmn']} | PCI:{info['pci']} | RNTI:{info['rnti']}]"
+                            # ---------------------------------------------------
+                            
                             dato = {
-                                "Tiempo": timestamp,
-                                "UE": f"Usuario {fila['ue']}",
+                                "Tiempo": inicio_segundo, 
+                                "UE": etiqueta_pro, # Usamos la etiqueta enriquecida
                                 "Consumo (Bytes)": fila['consumo']
                             }
                             historico_grafica.append(dato)
-                            datos_totales_sesion.append(dato) # Guardamos para el histórico total
+                            datos_totales_sesion.append(dato)
                         
-                        # Mantenemos la gráfica fluida
                         if len(historico_grafica) > 500:
                             historico_grafica = historico_grafica[-500:]
                 
                 datos_segundo_actual = []
-                inicio_segundo = ahora
+                inicio_segundo = tiempo_actual_log
 
-            # Punto 6: Guardado en Parquet cada 30 segundos 
-            if ahora >= proximo_guardado_parquet:
+            # FASE 1: GUARDADO EN PARQUET PUNTO 6
+            if tiempo_actual_log.timestamp() >= proximo_guardado_parquet:
                 if datos_totales_sesion:
                     df_parquet = pl.DataFrame(datos_totales_sesion)
-                    df_parquet.write_parquet(archivo_parquet) # Método nativo de Polars 
-                    print(f"--- [{timestamp.strftime('%H:%M:%S')}] Backup: {len(datos_totales_sesion)} registros guardados en Parquet ---")
-                proximo_guardado_parquet = ahora + 30
+                    df_parquet.write_parquet(archivo_parquet)
+                proximo_guardado_parquet = tiempo_actual_log.timestamp() + 30
 
-# --- INTERFAZ DASH ---
+# --- INTERFAZ DASH --- PUNTO 5
 app = Dash(__name__)
 app.layout = html.Div([
-    html.H1("Monitor de Tráfico 5G - Fase 1 Finalizada", style={'textAlign': 'center'}),
+    html.H1("Monitor de Tráfico 5G (Fases 1 y 2 Completadas)", style={'textAlign': 'center'}),
     dcc.Graph(id='grafica-trafico'),
     dcc.Interval(id='intervalo-actualizacion', interval=1000, n_intervals=0)
 ])
