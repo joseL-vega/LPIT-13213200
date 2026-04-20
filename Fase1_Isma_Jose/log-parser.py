@@ -25,6 +25,10 @@ def motor_lectura():
     proximo_guardado_parquet = None
     datos_segundo_actual = []
     
+    # Expresión regular para validar que la línea empieza exactamente con una fecha ISO
+    # Ejemplo: 2026-01-19T08:55:48.084727
+    patron_fecha = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)")
+    
     with open(archivo_log, 'r') as archivo:
         while True:
             linea = archivo.readline()
@@ -32,10 +36,13 @@ def motor_lectura():
                 time.sleep(0.01)
                 continue
             
-            try:
-                tiempo_actual_log = datetime.fromisoformat(linea.split()[0])
-            except (ValueError, IndexError):
-                continue
+            # 1. RESTRICCIÓN ESTRICTA: Solo procesar si la línea empieza con una fecha
+            match_fecha = patron_fecha.match(linea)
+            if not match_fecha:
+                continue # Si no empieza por fecha, ignoramos la línea completamente
+            
+            # Si pasa el filtro, extraemos el tiempo de forma segura
+            tiempo_actual_log = datetime.fromisoformat(match_fecha.group(1))
 
             if inicio_segundo is None:
                 inicio_segundo = tiempo_actual_log
@@ -43,12 +50,10 @@ def motor_lectura():
             
             # ------------------------------------------------------------
             # FASE 2: CAZADOR DE IDENTIDADES (Enriquecimiento)
-            # Buscamos la línea de creación del UE para nutrir la agenda
             if "Created new CU-CP UE" in linea:
                 match_info = re.search(r"ue=(\d+).*?plmn=(\d+).*?pci=(\d+).*?rnti=(\w+)", linea)
                 if match_info:
                     ue_id = int(match_info.group(1))
-                    # Guardamos los datos en la agenda
                     info_usuarios[ue_id] = {
                         "plmn": match_info.group(2),
                         "pci": match_info.group(3),
@@ -72,18 +77,14 @@ def motor_lectura():
                         for fila in resumen.to_dicts():
                             ue_id = fila['ue']
                             
-                            # --- FASE 2: EL CHIVATO (Consultamos la agenda) ---
-                            # Si el usuario está en la agenda, cogemos sus datos. Si no, ponemos "Desconocido"
+                            # --- FASE 2: (Consultamos la agenda) ---
                             info = info_usuarios.get(ue_id, {"plmn": "?", "pci": "?", "rnti": "?"})
-                            
-                            # Creamos una etiqueta enriquecida súper pro para la gráfica
                             etiqueta_pro = f"UE {ue_id} [PLMN:{info['plmn']} | PCI:{info['pci']} | RNTI:{info['rnti']}]"
-                            # ---------------------------------------------------
                             
                             dato = {
                                 "Tiempo": inicio_segundo, 
-                                "UE": etiqueta_pro, # Usamos la etiqueta enriquecida
-                                "Consumo (Bytes)": fila['consumo']
+                                "UE": etiqueta_pro, 
+                                "SDAP (Bytes)": fila['consumo'] 
                             }
                             historico_grafica.append(dato)
                             datos_totales_sesion.append(dato)
@@ -104,7 +105,7 @@ def motor_lectura():
 # --- INTERFAZ DASH --- PUNTO 5
 app = Dash(__name__)
 app.layout = html.Div([
-    html.H1("Monitor de Tráfico 5G (Fases 1 y 2 Completadas)", style={'textAlign': 'center'}),
+    html.H1("Monitor de Tráfico 5G", style={'textAlign': 'center'}),
     dcc.Graph(id='grafica-trafico'),
     dcc.Interval(id='intervalo-actualizacion', interval=1000, n_intervals=0)
 ])
@@ -119,7 +120,8 @@ def actualizar_grafica(n):
             return px.line(title="Esperando flujo de datos...")
         df_plot = pl.DataFrame(historico_grafica).sort("Tiempo")
     
-    return px.line(df_plot, x="Tiempo", y="Consumo (Bytes)", color="UE", markers=True)
+  
+    return px.line(df_plot, x="Tiempo", y="SDAP (Bytes)", color="UE", markers=True)
 
 if __name__ == '__main__':
     threading.Thread(target=motor_lectura, daemon=True).start()
